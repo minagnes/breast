@@ -1,36 +1,29 @@
-\
 # -*- coding: utf-8 -*-
 """
-유방영상의학과 근무 스케줄 통합 생성기 (generate_schedule.py)
+유방영상의학과 근무 스케줄 - 공통 엔진 (schedule_core.py)
 ================================================================
-schedule_generator.py 의 배정 로직 + 휴가 엑셀 입력/반영을 한 파일로 묶은 버전.
-한 번 실행으로 아래 4단계가 순서대로 진행된다(스크립트를 다시 실행할 필요 없음).
+배정 규칙·스케줄 생성 로직·엑셀 시트 작성을 모두 담은 "단일 진실 공급원".
+터미널판(generate_schedule.py)과 웹판(streamlit_app.py)이 이 모듈을 함께 import 한다.
+→ 규칙을 바꿀 때는 이 파일 한 곳만 고치면 두 프로그램에 동시에 반영된다.
 
-사용법 (1회 실행 안에서 진행)
-------------------------------
-    $ python generate_schedule.py
-    1) 연도 (예: 2026): 2026
-       월 (예: 9): 9
-       → 공휴일은 holidays 라이브러리로 자동 조회한다(대체공휴일 포함, 별도 입력 없음).
-       → 그 즉시 달력 형태의 vacation_2026-09.xlsx 가 만들어진다
-         (이미 있으면 기존 파일을 그대로 두고 재사용 - 덮어써서 이전 입력이 지워지지 않음).
-    2) 화면에 "휴가 입력표를 열어 휴가/출장 일정을 작성 후 저장하세요" 안내가 뜬다.
-       → 사용자가 vacation_2026-09.xlsx 를 열어 K1~K5(K3 제외)/F1~F4/J1·J2/R
-         각자의 칸에 휴가·학회·출장 등을 입력하고 엑셀에서 저장한다.
-    3) 터미널이 "작성 후 저장하셨으면 Y를 누르세요"로 대기한다.
-       → 저장을 마친 뒤 터미널에 Y 를 입력하고 Enter.
-    4) Y 를 누르면 스크립트가 vacation_2026-09.xlsx 를 다시 읽어들여
-       휴가를 반영한 2026-09.xlsx(본 스케줄 + VIP 시트)를 생성하고 종료한다.
+이 파일은 직접 실행하지 않는다(진입점 아님). 실행은 아래 두 파일로 한다.
+    - 터미널: python src/generate_schedule.py
+    - 웹    : python -m streamlit run src/streamlit_app.py
 
-기준 문서: 스케줄_배정_규정.docx
+기준 문서(SoT): docs/스케줄_배정_규정.docx  ← 규칙을 바꾸면 이 문서도 함께 갱신한다.
+    (SoT 문서가 말하는 schedule_generator.py 의 배정 로직이 지금은 이 파일에 들어 있다.)
 K4·K5 고정 배정 규칙:
     - K5: 오전 Mammo 화·금 고정 / 오후 Breast US 화·금 고정 / 오후 Mammo2 월·수·목 고정
     - K4: 오후 Mammo2 월·화·금 고정
 
 의존 패키지: openpyxl, holidays (둘 다 없으면 `pip install openpyxl holidays` 로 설치)
+
+파일 저장 위치(어디에 xlsx 를 만들지)는 이 모듈이 정하지 않는다.
+이 모듈의 build_vacation_template()·save_workbook() 은 Workbook 객체만 돌려주고,
+실제 저장(터미널=디스크, 웹=다운로드)은 각 진입점이 담당한다.
 """
 
-import os
+import io
 from datetime import date, timedelta
 
 from openpyxl import Workbook, load_workbook
@@ -68,8 +61,6 @@ ROTATION_ANCHOR_LABEL = 1
 
 MANUAL_ADJUSTMENTS = []
 
-OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
-
 FONT_NAME = "맑은 고딕"
 HEADER_FILL = PatternFill("solid", fgColor="DCE6F1")
 LABEL_FILL = PatternFill("solid", fgColor="F2F2F2")
@@ -83,16 +74,16 @@ VAC_CHOICES = ["", "휴가(종일)", "휴가(오전)", "휴가(오후)", "학회
                "출장(종일)", "출장(오전)", "출장(오후)", "교육(종일)", "반차(오전)", "반차(오후)"]
 
 # ------------------------------------------------------------
-# 아래 4개는 main() 에서 터미널 입력을 받아 채워진다 (모듈 로드시엔 빈 값)
+# 엔진이 읽는 전역 상태 (모듈 로드시엔 빈 값).
+# 진입점(generate_schedule.py / streamlit_app.py)이 스케줄 생성 직전에
+# schedule_core.HOLIDAYS / .VACATIONS / .VAC_INDEX 로 직접 대입해 채운다.
+# ※ from-import 로 가져와 재대입하면 엔진이 못 보므로 반드시 모듈 속성으로 설정할 것.
 # ------------------------------------------------------------
 YEAR = None
 MONTH = None
 HOLIDAYS = {}
 VACATIONS = []
 VAC_INDEX = {}
-
-if False:  # MONTH 가 정해지기 전이라 홀짝은 main() 에서 다시 계산한다
-    MONWED_ITEM, TUETHU_ITEM = "VAB", "ST-MMT"
 
 
 def vab_stmmt_items(month):
@@ -153,7 +144,8 @@ def get_holidays_for_month(year, month):
     try:
         import holidays as holidays_lib
     except ImportError:
-        raise SystemExit(
+        # 표시 방법(터미널 종료 / 웹 오류창)은 진입점이 정하도록 RuntimeError 로 알린다.
+        raise RuntimeError(
             "공휴일 자동 조회에 필요한 'holidays' 패키지가 설치되어 있지 않습니다.\n"
             "터미널에서 아래 명령을 실행한 뒤 다시 실행하세요:\n"
             "    pip install holidays"
@@ -185,7 +177,9 @@ def parse_period_label(text):
 # ============================================================
 
 
-def build_vacation_template(year, month, holidays, path):
+def build_vacation_template(year, month, holidays):
+    """휴가 입력표 Workbook 을 만들어 돌려준다 (파일로 저장하지 않음).
+    저장은 진입점이 담당한다(터미널=디스크, 웹=다운로드)."""
     dates = all_dates(year, month)
 
     wb = Workbook()
@@ -256,19 +250,21 @@ def build_vacation_template(year, month, holidays, path):
 
     ws.column_dimensions["A"].width = 10
     ws.freeze_panes = ws.cell(row=first_data_row, column=2)
-    wb.save(path)
+    return wb
 
 
-def parse_vacation_file(path, year, month):
-    """vacation_YYYY-MM.xlsx 를 읽어 (이름, date, 구분, 라벨) 리스트로 변환."""
-    wb = load_workbook(path, data_only=True)
+def parse_vacation_file(src, year, month, warn=print):
+    """작성된 vacation 엑셀을 읽어 (이름, date, 구분, 라벨) 리스트로 변환.
+    src 는 파일 경로 문자열도, 업로드된 파일 객체도 모두 받는다(load_workbook 이 둘 다 지원).
+    경고는 warn 콜백으로 낸다(터미널=print, 웹=st.warning)."""
+    wb = load_workbook(src, data_only=True)
     ws = wb["vacation"] if "vacation" in wb.sheetnames else wb.active
     dates = all_dates(year, month)
     first_data_row = 6
 
     if ws.max_column < 1 + len(dates):
-        print(f"[경고] {os.path.basename(path)}의 열 개수가 예상({len(dates)}개)보다 적습니다. "
-              f"날짜 헤더가 바뀌었는지 확인하세요.")
+        warn(f"[경고] 파일의 열 개수가 예상({len(dates)}개)보다 적습니다. "
+             f"연/월이 휴가표를 만들 때와 같은지, 날짜 헤더가 바뀌지 않았는지 확인하세요.")
 
     name_to_row = {}
     for r in range(first_data_row, first_data_row + len(ALL_NAMES) + 10):
@@ -278,7 +274,7 @@ def parse_vacation_file(path, year, month):
 
     missing_names = [n for n in ALL_NAMES if n not in name_to_row]
     if missing_names:
-        print(f"[경고] vacation 엑셀에서 다음 근무자를 찾지 못했습니다: {', '.join(missing_names)}")
+        warn(f"[경고] vacation 엑셀에서 다음 근무자를 찾지 못했습니다: {', '.join(missing_names)}")
 
     vacations = []
     for name, r in name_to_row.items():
@@ -1030,6 +1026,8 @@ def write_vip_sheet(ws, year, month, weeks, day_data):
 
 
 def save_workbook(year, month, day_data, weeks):
+    """본 스케줄 + VIP 시트가 담긴 Workbook 을 만들어 (wb, problems) 로 돌려준다.
+    실제 저장 위치는 진입점이 정한다(터미널=outputs 디스크, 웹=브라우저 다운로드)."""
     wb = Workbook()
     ws = wb.active
     ws.title = f"{year}-{month:02d}"
@@ -1039,74 +1037,23 @@ def save_workbook(year, month, day_data, weeks):
     ws2 = wb.create_sheet("VIP")
     write_vip_sheet(ws2, year, month, weeks, day_data)
 
-    base_name = f"{year}-{month:02d}"
-    path = os.path.join(OUTPUT_DIR, base_name + ".xlsx")
-    n = 1
-    while os.path.exists(path):
-        path = os.path.join(OUTPUT_DIR, f"{base_name}-{n}.xlsx")
-        n += 1
-    wb.save(path)
-    return path, problems
+    return wb, problems
 
 
-# ============================================================
-# 12. 메인 (터미널 대화형)
-# ============================================================
+def to_bytes(wb):
+    """Workbook 을 바이트로 직렬화한다(웹 다운로드 버튼용)."""
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
 
 
-def main():
-    global YEAR, MONTH, HOLIDAYS, VACATIONS, VAC_INDEX
-
-    print("=== 유방영상의학과 스케줄 생성기 ===")
-
-    # 1) 연도/월 입력 → 공휴일은 holidays 라이브러리로 자동 조회 → 휴가 입력표 즉시 생성
-    YEAR = int(input("연도 (예: 2026): ").strip())
-    MONTH = int(input("월 (예: 9): ").strip())
-    HOLIDAYS = get_holidays_for_month(YEAR, MONTH)
-    if HOLIDAYS:
-        print("자동 조회된 공휴일: " + ", ".join(
-            f"{d.month}/{d.day}({name})" for d, name in sorted(HOLIDAYS.items())
-        ))
-    else:
-        print("자동 조회 결과 해당 기간에 공휴일이 없습니다.")
-
-    vac_path = os.path.join(OUTPUT_DIR, f"vacation_{YEAR}-{MONTH:02d}.xlsx")
-
-    if os.path.exists(vac_path):
-        print(f"\n휴가 입력표가 이미 있습니다: {vac_path}")
-        print("(기존 파일을 그대로 사용합니다 - 필요하면 열어서 내용을 확인/수정하세요.)")
-    else:
-        build_vacation_template(YEAR, MONTH, HOLIDAYS, vac_path)
-        print(f"\n휴가 입력표를 만들었습니다: {vac_path}")
-
-    # 2) 사용자가 엑셀을 열어 휴가/출장 일정을 작성하고 저장하도록 안내
-    print("엑셀을 열어 K1~K5(K3 제외)/F1~F4/J1·J2/R 각자의 휴가·학회·출장 일정을")
-    print("해당 날짜 칸에 입력한 뒤 저장하세요.")
-
-    # 3) 저장 완료를 터미널에서 Y로 확인받을 때까지 대기
-    while True:
-        ans = input("작성 후 저장하셨으면 Y를 누르세요 (Y 입력 시 스케줄 생성 진행): ").strip().lower()
-        if ans == "y":
-            break
-
-    # 4) vacation 엑셀을 다시 읽어 스케줄 생성
-    VACATIONS = parse_vacation_file(vac_path, YEAR, MONTH)
-    VAC_INDEX = {}
-    for (nm, dt_, period, label) in VACATIONS:
-        VAC_INDEX.setdefault((nm, dt_), []).append((period, label))
-    print(f"\n{os.path.basename(vac_path)} 에서 휴가/부재 {len(VACATIONS)}건을 읽었습니다.")
-
-    weeks, day_data = build_schedule(YEAR, MONTH)
-    path, problems = save_workbook(YEAR, MONTH, day_data, weeks)
-
-    print(f"\n저장 완료: {path}")
-    if problems:
-        print(f"[검증] 문제 {len(problems)}건 발견:")
-        for p in problems:
-            print(" -", p)
-    else:
-        print("[검증] 중복자/누락자 없음")
-
-
-if __name__ == "__main__":
-    main()
+def set_vacations(vacations):
+    """엔진이 읽는 전역 VACATIONS / VAC_INDEX 를 한 번에 설정하는 도우미.
+    진입점은 반드시 이 함수(또는 schedule_core.VACATIONS 직접 대입)로 채운다."""
+    VAC_INDEX_local = {}
+    for (nm, dt_, period, label) in vacations:
+        VAC_INDEX_local.setdefault((nm, dt_), []).append((period, label))
+    # 모듈 전역에 직접 대입 (엔진 함수들이 이 이름을 참조한다)
+    globals()["VACATIONS"] = list(vacations)
+    globals()["VAC_INDEX"] = VAC_INDEX_local

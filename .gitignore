@@ -1,0 +1,32 @@
+# 파이썬 가상환경
+.venv/
+venv/
+env/
+
+# 파이썬 캐시
+__pycache__/
+*.pyc
+
+# 결과물(스케줄/휴가 엑셀): 폴더는 남기고 내용물만 GitHub에서 제외
+outputs/*
+!outputs/.gitkeep
+*.xlsx
+*.xlsm
+*.xls
+
+# ⚠ 문서 폴더: 근무자 개인정보(SoT 규정 등)라 GitHub에 올리지 않음(로컬 전용)
+docs/
+
+# 엑셀 임시 파일
+~$*
+
+# OS 생성 파일
+.DS_Store
+Thumbs.db
+
+# 편집기 설정
+.vscode/
+.idea/
+
+# Claude Code 로컬 설정(공유 안 함)
+.claude/settings.local.json
