@@ -20,7 +20,7 @@ import schedule_core as core
 from schedule_core import (
     get_holidays_for_month,
     build_vacation_template,
-    parse_vacation_file,
+    parse_vacation_workbook,
     build_schedule,
     save_workbook,
     to_bytes,
@@ -86,10 +86,15 @@ def render_app():
             year_i = st.session_state["year"]
             month_i = st.session_state["month"]
 
-            # 엔진이 읽는 전역은 반드시 core 모듈에 직접 설정한다.
-            core.HOLIDAYS = st.session_state["holidays"]
+            # 휴가표를 한 번만 읽어 사람별 부재 + 특일지정(수동/임시공휴일)을 함께 파싱
+            vacations, manual_days, extra_holidays = parse_vacation_workbook(
+                uploaded, year_i, month_i, warn=st.warning
+            )
 
-            vacations = parse_vacation_file(uploaded, year_i, month_i, warn=st.warning)
+            # 엔진이 읽는 전역은 반드시 core 모듈에 직접 설정한다.
+            # 자동 조회 공휴일 + 엑셀에서 추가한 임시공휴일을 합친다.
+            core.HOLIDAYS = {**st.session_state["holidays"], **extra_holidays}
+            core.MANUAL_DAYS = set(manual_days)   # 규칙 배정 건너뛰고 빈칸으로 둘 날
             core.set_vacations(vacations)
 
             weeks, day_data = build_schedule(year_i, month_i)
@@ -98,7 +103,15 @@ def render_app():
             st.session_state["schedule_bytes"] = to_bytes(wb)
             st.session_state["problems"] = problems
             st.session_state["vac_count"] = len(vacations)
-            st.success(f"휴가/부재 {len(vacations)}건을 반영해 스케줄을 생성했습니다.")
+
+            msg = f"휴가/부재 {len(vacations)}건을 반영해 스케줄을 생성했습니다."
+            if manual_days:
+                days_txt = ", ".join(f"{d.month}/{d.day}" for d in sorted(manual_days))
+                msg += f"  · 수동 배정일(빈칸): {days_txt}"
+            if extra_holidays:
+                hol_txt = ", ".join(f"{d.month}/{d.day}" for d in sorted(extra_holidays))
+                msg += f"  · 임시공휴일: {hol_txt}"
+            st.success(msg)
 
     if "schedule_bytes" in st.session_state:
         y_, m_ = st.session_state["year"], st.session_state["month"]

@@ -34,13 +34,19 @@ from openpyxl.worksheet.datavalidation import DataValidation
 # 0. 고정 설정 (인력 구성 / 배정 규칙 - 사람이 바뀌지 않는 한 그대로 유지)
 # ============================================================
 
-K_STAFF = ["K1", "K2", "K4", "K5"]
+K_STAFF = ["K1", "K2", "K3", "K4", "K5"]
 F_STAFF = ["F1", "F2", "F3", "F4"]
 J_STAFF = ["J1", "J2"]
 R_NAME = "R"
 ALL_NAMES = K_STAFF + F_STAFF + J_STAFF + [R_NAME]
 
 BREAST_AM_LEAD = {0: "K4", 1: "K2", 2: "K2", 3: "K4", 4: "K4"}
+# 특정 날짜에만 오전 Breast US 대표 K를 교체(그 날 원래 대표 K는 자동으로 mammo/abus로 밀림).
+# 2026-08-31(월): K3가 9/1부터 출장이라 이 하루만 근무 → K3를 대표로, K4는 Breast US에서 빠짐.
+BREAST_AM_LEAD_OVERRIDE = {date(2026, 8, 31): "K3"}
+# 특정 날짜에만 '남는 K 중 오전 mammo로 보낼 사람'을 지정(나머지 남는 K는 abus).
+# 2026-08-31(월): K3가 Breast 대표로 들어가며 밀려난 K4를 abus 대신 mammo로.
+AM_MAMMO_PREFER = {date(2026, 8, 31): "K4"}
 BREAST_AM_EXTRA = {0: "K5", 2: "K5", 3: "K5"}
 K5_AM_MAMMO_DAYS = {1, 4}            # K5: 오전 Mammo 화·금 고정
 
@@ -56,8 +62,30 @@ BREAST_PM_FIX = {1: "K4", 2: "K5", 4: "K5"}
 
 WEEKDAY_NAMES = ["월", "화", "수", "목", "금", "토"]
 
-ROTATION_ANCHOR_MONDAY = date(2026, 8, 17)
-ROTATION_ANCHOR_LABEL = 1
+# ------------------------------------------------------------
+# 전공의(R) 로테이션: 28일(4주) 단위 '텀'마다 다른 전공의가 근무한다.
+# 각 텀은 일요일 시작·토요일 끝이라 스케줄 주(월~토) 경계와 정확히 맞는다.
+# (텀 시작일, 라벨) 표를 정답 소스로 쓴다. 라벨은 R# 대신 이니셜 등으로 바꿔도 된다.
+# 새 로테이션표가 나오면 이 표 13줄을 갱신/추가하면 된다(첨부 연간표 = 2026 사이클).
+# ------------------------------------------------------------
+R_TERMS = [
+    (date(2026, 3, 1),   "R1"),    # 1텀  3.1~3.28
+    (date(2026, 3, 29),  "R2"),    # 2텀  3.29~4.25
+    (date(2026, 4, 26),  "R3"),    # 3텀  4.26~5.23
+    (date(2026, 5, 24),  "R4"),    # 4텀  5.24~6.20
+    (date(2026, 6, 21),  "R5"),    # 5텀  6.21~7.18
+    (date(2026, 7, 19),  "R6"),    # 6텀  7.19~8.15
+    (date(2026, 8, 16),  "R7"),    # 7텀  8.16~9.12
+    (date(2026, 9, 13),  "R8"),    # 8텀  9.13~10.10
+    (date(2026, 10, 11), "R9"),    # 9텀  10.11~11.7
+    (date(2026, 11, 8),  "R10"),   # 10텀 11.8~12.5
+    (date(2026, 12, 6),  "R11"),   # 11텀 12.6~1.2
+    (date(2027, 1, 3),   "R12"),   # 12텀 1.3~1.30
+    (date(2027, 1, 31),  "R13"),   # 13텀 1.31~2.27
+]
+R_TERM_DAYS = 28                   # 한 텀 길이(일)
+R_TERM_COUNT = 13                  # 한 사이클의 텀 수
+R_CYCLE_ANCHOR = R_TERMS[0][0]     # 표 밖 날짜용 폴백 기준(1텀 시작)
 
 MANUAL_ADJUSTMENTS = []
 
@@ -66,12 +94,36 @@ HEADER_FILL = PatternFill("solid", fgColor="DCE6F1")
 LABEL_FILL = PatternFill("solid", fgColor="F2F2F2")
 SAT_FILL = PatternFill("solid", fgColor="F2F2F2")
 HOLIDAY_FILL = PatternFill("solid", fgColor="FCE4D6")
+MANUAL_FILL = PatternFill("solid", fgColor="FFF2CC")   # 수동 배정일 표시색(연노랑)
 THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
 # 휴가 입력 드롭다운 선택지 (자유 텍스트 입력도 가능)
 VAC_CHOICES = ["", "휴가(종일)", "휴가(오전)", "휴가(오후)", "학회(종일)", "학회(오전)", "학회(오후)",
                "출장(종일)", "출장(오전)", "출장(오후)", "교육(종일)", "반차(오전)", "반차(오후)"]
+
+# ------------------------------------------------------------
+# 특일(수동/임시공휴일) 지정용 '제어행'
+# vacation 엑셀 맨 아래 '◆특일지정' 행에 날짜별로 입력한다.
+#   - '수동배정'  → 그 날은 규칙 배정을 건너뛰고 전부 빈칸으로 둔다
+#                   (학회 등 대부분이 자리를 비워 규칙대로 짤 수 없는 날).
+#   - '임시공휴일' → 그 날을 공휴일로 취급한다
+#                   (holidays 라이브러리에 없던 갑작스런 임시공휴일).
+# ------------------------------------------------------------
+CONTROL_ROW_LABEL = "◆특일지정"
+CONTROL_CHOICES = ["", "수동배정", "임시공휴일"]
+
+
+def classify_control(text):
+    """제어행 셀 텍스트 → 'MANUAL' / 'HOLIDAY' / None."""
+    t = str(text).strip().lower()
+    if not t:
+        return None
+    if ("수동" in t) or ("manual" in t):
+        return "MANUAL"
+    if ("공휴일" in t) or ("휴일" in t) or ("holiday" in t):
+        return "HOLIDAY"
+    return None
 
 # ------------------------------------------------------------
 # 엔진이 읽는 전역 상태 (모듈 로드시엔 빈 값).
@@ -84,6 +136,7 @@ MONTH = None
 HOLIDAYS = {}
 VACATIONS = []
 VAC_INDEX = {}
+MANUAL_DAYS = set()   # 규칙 배정을 건너뛰고 빈칸으로 둘 '수동 배정일' (제어행에서 채움)
 
 
 def vab_stmmt_items(month):
@@ -121,8 +174,12 @@ def is_holiday(d):
     return d in HOLIDAYS
 
 
+def is_manual(d):
+    return d in MANUAL_DAYS
+
+
 def is_workday(d):
-    return d.weekday() != 5 and not is_holiday(d)
+    return d.weekday() != 5 and not is_holiday(d) and not is_manual(d)
 
 
 def away(name, d, session):
@@ -133,9 +190,21 @@ def away(name, d, session):
 
 
 def rotation_label_for_monday(monday):
-    weeks_diff = (monday - ROTATION_ANCHOR_MONDAY).days // 7
-    num = (ROTATION_ANCHOR_LABEL - 1 + weeks_diff) % 4 + 1
-    return f"R{num}"
+    """그 주(월요일)가 속한 전공의 로테이션 텀의 라벨을 돌려준다.
+    먼저 R_TERMS 표에서 찾고, 표 범위를 벗어나면 28일×13텀 순환으로 근사한다."""
+    first_start = R_TERMS[0][0]
+    last_end = R_TERMS[-1][0] + timedelta(days=R_TERM_DAYS)
+    if first_start <= monday < last_end:
+        label = R_TERMS[0][1]
+        for start, lbl in R_TERMS:
+            if start <= monday:
+                label = lbl
+            else:
+                break
+        return label
+    # 표 밖: 1텀 시작 기준으로 28일마다 R1~R13 순환(라벨만 근사, 필요시 표 갱신).
+    idx = ((monday - R_CYCLE_ANCHOR).days // R_TERM_DAYS) % R_TERM_COUNT
+    return f"R{idx + 1}"
 
 
 def get_holidays_for_month(year, month):
@@ -188,7 +257,8 @@ def build_vacation_template(year, month, holidays):
 
     ws["A1"] = f"{year}년 {month}월 휴가/부재 입력표 (vacation)"
     ws["A1"].font = Font(name=FONT_NAME, bold=True, size=13)
-    ws["A2"] = "칸에 직접 입력하거나 드롭다운에서 선택 (예: 휴가(오전)). 빈칸 = 정상 근무"
+    ws["A2"] = ("칸에 직접 입력하거나 드롭다운에서 선택 (예: 휴가(오전)). 빈칸 = 정상 근무  |  "
+                "맨 아래 ◆특일지정 행: 수동배정 / 임시공휴일")
     ws["A2"].font = Font(name=FONT_NAME, size=9, italic=True)
 
     header_row1, header_row2, first_data_row = 4, 5, 6
@@ -248,14 +318,52 @@ def build_vacation_template(year, month, holidays):
     last_col_letter = ws.cell(row=header_row1, column=1 + len(dates)).column_letter
     dv.add(f"B{first_data_row}:{last_col_letter}{last_row}")
 
+    # --- 특일 지정(제어) 행: '수동배정' / '임시공휴일' --------------------
+    control_row = last_row + 1
+    cc = ws.cell(row=control_row, column=1, value=CONTROL_ROW_LABEL)
+    cc.font = Font(name=FONT_NAME, bold=True, size=10)
+    cc.fill = MANUAL_FILL
+    cc.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    cc.border = BORDER
+    for i, d in enumerate(dates):
+        c = ws.cell(row=control_row, column=2 + i)
+        c.font = Font(name=FONT_NAME, size=10)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.border = BORDER
+        if d.weekday() == 5:
+            c.fill = SAT_FILL
+        elif d in holidays:
+            c.fill = HOLIDAY_FILL
+
+    dv2 = DataValidation(type="list", formula1='"' + ",".join(CONTROL_CHOICES) + '"', allow_blank=True)
+    ws.add_data_validation(dv2)
+    dv2.add(f"B{control_row}:{last_col_letter}{control_row}")
+
+    ws.cell(
+        row=control_row + 2, column=1,
+        value="◆특일지정 사용법:  '수동배정'=그 날은 자동배정을 건너뛰고 전부 빈칸(학회 등 대부분 부재일, 직접 작성) · "
+              "'임시공휴일'=그 날을 공휴일로 처리",
+    ).font = Font(name=FONT_NAME, size=9, italic=True)
+
     ws.column_dimensions["A"].width = 10
     ws.freeze_panes = ws.cell(row=first_data_row, column=2)
     return wb
 
 
 def parse_vacation_file(src, year, month, warn=print):
-    """작성된 vacation 엑셀을 읽어 (이름, date, 구분, 라벨) 리스트로 변환.
-    src 는 파일 경로 문자열도, 업로드된 파일 객체도 모두 받는다(load_workbook 이 둘 다 지원).
+    """(구버전 호환) 사람별 부재 리스트만 돌려준다.
+    manual_days/extra_holidays 까지 필요하면 parse_vacation_workbook() 을 쓴다."""
+    vacations, _manual, _extra = parse_vacation_workbook(src, year, month, warn=warn)
+    return vacations
+
+
+def parse_vacation_workbook(src, year, month, warn=print):
+    """작성된 vacation 엑셀을 '한 번만' 읽어 다음 3가지를 돌려준다.
+        vacations      : [(이름, date, 구분, 라벨), ...]      ← 사람별 부재
+        manual_days    : set[date]                           ← ◆특일지정=수동배정
+        extra_holidays : dict[date, str]                     ← ◆특일지정=임시공휴일
+    src 는 파일 경로 문자열도, 업로드된 파일 객체도 모두 받는다.
+    (업로드 스트림을 두 번 열면 소진될 수 있으므로 반드시 한 번만 읽는다.)
     경고는 warn 콜백으로 낸다(터미널=print, 웹=st.warning)."""
     wb = load_workbook(src, data_only=True)
     ws = wb["vacation"] if "vacation" in wb.sheetnames else wb.active
@@ -266,11 +374,15 @@ def parse_vacation_file(src, year, month, warn=print):
         warn(f"[경고] 파일의 열 개수가 예상({len(dates)}개)보다 적습니다. "
              f"연/월이 휴가표를 만들 때와 같은지, 날짜 헤더가 바뀌지 않았는지 확인하세요.")
 
+    scan_rows = range(first_data_row, first_data_row + len(ALL_NAMES) + 12)
     name_to_row = {}
-    for r in range(first_data_row, first_data_row + len(ALL_NAMES) + 10):
-        nm = ws.cell(row=r, column=1).value
-        if nm in ALL_NAMES:
-            name_to_row[nm] = r
+    control_row = None
+    for r in scan_rows:
+        label = ws.cell(row=r, column=1).value
+        if label in ALL_NAMES:
+            name_to_row[label] = r
+        elif label == CONTROL_ROW_LABEL:
+            control_row = r
 
     missing_names = [n for n in ALL_NAMES if n not in name_to_row]
     if missing_names:
@@ -287,7 +399,20 @@ def parse_vacation_file(src, year, month, warn=print):
                 continue
             period, label = parse_period_label(text)
             vacations.append((name, d, period, label))
-    return vacations
+
+    manual_days, extra_holidays = set(), {}
+    if control_row is not None:
+        for i, d in enumerate(dates):
+            kind = classify_control(ws.cell(row=control_row, column=2 + i).value)
+            if kind == "MANUAL":
+                manual_days.add(d)
+            elif kind == "HOLIDAY":
+                extra_holidays[d] = "임시공휴일"
+    else:
+        warn("[안내] ◆특일지정 행을 찾지 못했습니다(구버전 휴가표일 수 있음). "
+             "수동배정/임시공휴일 기능 없이 진행합니다.")
+
+    return vacations, manual_days, extra_holidays
 
 
 # ============================================================
@@ -339,7 +464,7 @@ def assign_am(d, is_first_workday):
         duties["thyroid"].append("K1")
         used_K.add("K1")
 
-    lead = BREAST_AM_LEAD[wd]
+    lead = BREAST_AM_LEAD_OVERRIDE.get(d, BREAST_AM_LEAD[wd])
     extra = BREAST_AM_EXTRA.get(wd)
     if lead in avail_K:
         duties["breast"].append(lead)
@@ -360,6 +485,10 @@ def assign_am(d, is_first_workday):
         used_K.add(extra)
 
     remaining_K = [k for k in avail_K if k not in used_K]
+    # 특정 날짜에만 '남는 K 중 mammo로 보낼 사람'을 지정(나머지는 abus).
+    prefer_mammo = AM_MAMMO_PREFER.get(d)
+    if prefer_mammo in remaining_K:
+        remaining_K = [prefer_mammo] + [k for k in remaining_K if k != prefer_mammo]
     if wd in K5_AM_MAMMO_DAYS and "K5" in remaining_K:
         duties["mammo"].append("K5")
         for k in remaining_K:
@@ -370,8 +499,9 @@ def assign_am(d, is_first_workday):
         for k in remaining_K[1:]:
             duties["abus"].append(k)
 
-    breast_cap = (4 if wd in (0, 2, 3) else 5) + (1 if extra and extra in duties["breast"] else 0)
-    thyroid_cap = 3 if wd in (0, 2, 3) else 4
+    # AM 정원(최대 인원): Breast US 최대 5명, Thyroid US 최대 4명 (요일 무관)
+    breast_cap = 5
+    thyroid_cap = 4
     mammo_cap = 2
 
     def slot_open(cat):
@@ -382,6 +512,24 @@ def assign_am(d, is_first_workday):
         if cat == "mammo":
             return len(duties["mammo"]) < mammo_cap and len(duties["mammo"]) >= 1
         return False
+
+    # J 배정을 F·R보다 '먼저' 처리해 자리를 선점한다.
+    # → 이후 F·R 채움이 정원 안에서만 이뤄져 J를 포함해도 Breast US 5명 / Thyroid US 4명을
+    #   넘지 않는다(정원은 최대값이며, 인원이 적어 그보다 작아지는 것은 정상).
+    # 규정: J1·J2가 모두 있으면 서로 다른 duty에, 한 명만 있으면 자기 누적이 적은 쪽에 배정.
+    if len(avail_J) == 2:
+        j_a, j_b = avail_J
+        cat_a = min(("breast", "thyroid"), key=lambda c: STATE.j_am[j_a][c])
+        cat_b = "thyroid" if cat_a == "breast" else "breast"
+        duties[cat_a].append(j_a)
+        duties[cat_b].append(j_b)
+        STATE.j_am[j_a][cat_a] += 1
+        STATE.j_am[j_b][cat_b] += 1
+    elif len(avail_J) == 1:
+        j = avail_J[0]
+        cat = min(("breast", "thyroid"), key=lambda c: STATE.j_am[j][c])
+        duties[cat].append(j)
+        STATE.j_am[j][cat] += 1
 
     day_ordinal = (d - date(d.year, 1, 1)).days
     start = day_ordinal % max(len(avail_F), 1)
@@ -405,8 +553,6 @@ def assign_am(d, is_first_workday):
             chosen = "mammo"
         elif open_cats:
             chosen = min(open_cats, key=lambda c: STATE.r_am_week[c])
-        elif thyroid_cap and len(duties["thyroid"]) < thyroid_cap + 1:
-            chosen = "thyroid"
         if chosen:
             duties[chosen].append(R_NAME)
             STATE.r_am[chosen] += 1
@@ -415,23 +561,6 @@ def assign_am(d, is_first_workday):
                 STATE.r_mammo_partners.add(duties["mammo"][0])
         else:
             notes.append(f"{d.month}/{d.day} R 오전 자리 부족 → 배정 실패(정원 초과 확인 필요)")
-
-    if len(avail_J) == 2:
-        j_a, j_b = avail_J
-        cat_a = min(("breast", "thyroid"), key=lambda c: STATE.j_am[j_a][c])
-        cat_b = "thyroid" if cat_a == "breast" else "breast"
-        duties[cat_a].append(j_a)
-        duties[cat_b].append(j_b)
-        STATE.j_am[j_a][cat_a] += 1
-        STATE.j_am[j_b][cat_b] += 1
-        for c in (cat_a, cat_b):
-            if len(duties[c]) > (breast_cap if c == "breast" else thyroid_cap):
-                notes.append(f"{d.month}/{d.day} J 배정으로 {c} 정원 초과(규정상 정상)")
-    elif len(avail_J) == 1:
-        j = avail_J[0]
-        cat = min(("breast", "thyroid"), key=lambda c: STATE.j_am[j][c])
-        duties[cat].append(j)
-        STATE.j_am[j][cat] += 1
 
     r_cat = None
     for c in ("breast", "thyroid"):
@@ -674,6 +803,8 @@ def build_schedule(year, month):
                 entry["stmmt"] = stmmt
                 entry["locali"] = locali
                 entry["notes"] = am_notes + pm_notes
+            elif is_manual(d):
+                entry["notes"].append("※ 수동 배정일: 자동배정을 건너뜁니다. 직접 채워 주세요.")
             day_data[d] = entry
 
     apply_manual_adjustments(day_data)
@@ -718,7 +849,7 @@ def compute_stats(day_data):
     total = sum(s["counts"]) + s["mammo2"]
     actual = sum(s["counts"])
     ratios = [round(c / actual, 6) if actual else None for c in s["counts"]]
-    rows.append(["R (R1~R4)"] + s["counts"] + [s["mammo2"], total, s["workdays"], actual] + ratios)
+    rows.append(["R (R1~R13)"] + s["counts"] + [s["mammo2"], total, s["workdays"], actual] + ratios)
 
     return rows, stat
 
@@ -850,7 +981,16 @@ def write_main_sheet(ws, year, month, weeks, day_data):
         row += 1
         style_header_cell(ws.cell(row=row, column=1))
         for i in range(6):
-            style_header_cell(ws.cell(row=row, column=2 + i, value=WEEKDAY_NAMES[i]))
+            d = week_dates[i]
+            hc = ws.cell(row=row, column=2 + i, value=WEEKDAY_NAMES[i])
+            if is_manual(d):
+                hc.value = WEEKDAY_NAMES[i] + "(수동)"
+                style_header_cell(hc, fill=MANUAL_FILL)
+            elif is_holiday(d):
+                hc.value = WEEKDAY_NAMES[i] + "(휴일)"
+                style_header_cell(hc, fill=HOLIDAY_FILL)
+            else:
+                style_header_cell(hc)
         row += 1
 
         vac_lines, note_lines = [], []
@@ -1019,6 +1159,8 @@ def write_vip_sheet(ws, year, month, weeks, day_data):
                             val = day_data[d]["rotation_label"]
                     elif d in day_data and is_holiday(d):
                         val = "공휴일"
+                    elif d in day_data and is_manual(d):
+                        val = "수동"
                     cc = ws.cell(row=row + 2 + ri, column=col0 + 1 + i, value=val)
                     cc.font = Font(name=FONT_NAME, size=10)
                     cc.alignment = Alignment(horizontal="center", vertical="center")
