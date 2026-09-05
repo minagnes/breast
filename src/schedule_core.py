@@ -53,8 +53,8 @@ K5_AM_MAMMO_DAYS = {1, 4}            # K5: 오전 Mammo 화·금 고정
 MAMMO2_PM_FIX = {
     0: ["K1", "K5", "K4"],  # 월 (K5·K4 고정)
     1: ["K1", "K2", "K5"],  # 화 (K5 고정)
-    2: ["K1", "K2", "K4"],  # 수 (K4 고정)
-    3: ["K5"],              # 목 (K5 고정)
+    2: ["K1", "K2"],        # 수 (K4는 목으로 이동 — K4 Mammo2는 월·목·금)
+    3: ["K5", "K4"],        # 목 (K5·K4 고정)
     4: ["K1", "K2", "K4"],  # 금 (K4 고정)
 }
 # 오후 Breast US 지정자 (Mammo2 비고정 K 중) — 위 Mammo2 고정에서 빠지는 K가 자동으로 배정됨
@@ -470,10 +470,13 @@ def assign_am(d, is_first_workday):
         duties["breast"].append(lead)
         used_K.add(lead)
     else:
+        # 주 담당 K가 없을 때의 단독 대체 후보.
+        # K4·K5는 다른 K 없이도 오전 Breast US를 단독으로 맡을 수 있다(자격자).
+        # → 예전엔 K5를 자기 Mammo 요일(화·금)에 제외했으나, 이제 제외하지 않아
+        #   그 요일에 주 담당이 비면 K5가 혼자 Breast US를 커버할 수 있다.
         pool = [
             k for k in avail_K
             if k not in used_K and k != extra and k != lead
-            and not (wd in K5_AM_MAMMO_DAYS and k == "K5")
         ]
         if pool:
             sub = pool[0]
@@ -637,8 +640,7 @@ def assign_pm(d):
             duties["breast"].append("J1")
         else:
             duties["thyroid"].append("J1")
-    elif wd == 4 and avail_J1:
-        duties["breast"].append("J1")
+    # 금요일 오후 J 근무 없음(삭제됨). 월요일 오후만 근무.
 
     return duties, notes, avail_F, avail_R
 
@@ -888,7 +890,7 @@ def pm_expected(name, d):
     if name == "J2":
         return False
     if name == "J1":
-        return d.weekday() in (0, 4)
+        return d.weekday() == 0   # J1 오후 근무는 월요일만(금요일 오후 삭제됨)
     return True
 
 
