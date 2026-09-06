@@ -12,9 +12,11 @@
 
 기준 문서(SoT): docs/스케줄_배정_규정.docx  ← 규칙을 바꾸면 이 문서도 함께 갱신한다.
     (SoT 문서가 말하는 schedule_generator.py 의 배정 로직이 지금은 이 파일에 들어 있다.)
-K4·K5 고정 배정 규칙:
-    - K5: 오전 Mammo 화·금 고정 / 오후 Breast US 화·금 고정 / 오후 Mammo2 월·수·목 고정
-    - K4: 오후 Mammo2 월·화·금 고정
+K4·K5 고정 배정 규칙(현재):
+    - 오전 Breast US ↔ Mammo 짝: K4가 Breast US면 K5가 Mammo / K5가 Breast US(수)면 K4가 Mammo.
+      → K5 오전 Mammo: 월·화·목·금 / K5 오전 Breast US 추가고정: 수 / K4 오전 Breast US 주담당: 월·목·금
+    - 그날 Mammo 담당 K는 Breast 대체로 빼앗기지 않게 보호하고, K가 부족하면 남는 K를 Mammo에 우선 배정한다.
+    - K4 오후 Mammo2 고정: 월·목·금 / K5 오후 Mammo2 고정: 월·화·목
 
 의존 패키지: openpyxl, holidays (둘 다 없으면 `pip install openpyxl holidays` 로 설치)
 
@@ -47,8 +49,12 @@ BREAST_AM_LEAD_OVERRIDE = {date(2026, 8, 31): "K3"}
 # 특정 날짜에만 '남는 K 중 오전 mammo로 보낼 사람'을 지정(나머지 남는 K는 abus).
 # 2026-08-31(월): K3가 Breast 대표로 들어가며 밀려난 K4를 abus 대신 mammo로.
 AM_MAMMO_PREFER = {date(2026, 8, 31): "K4"}
-BREAST_AM_EXTRA = {0: "K5", 2: "K5", 3: "K5"}
-K5_AM_MAMMO_DAYS = {1, 4}            # K5: 오전 Mammo 화·금 고정
+# 오전 Breast US 추가 고정 K(주 담당과 함께 들어감). 이제 수요일만 K5가 추가로 Breast US.
+# (월·목은 K4가 단독 Breast US, K5는 Mammo로 → 아래 K5_AM_MAMMO_DAYS 참조)
+BREAST_AM_EXTRA = {2: "K5"}
+# K5: 오전 Mammo 담당 요일. 월·화·목·금 = K5가 Mammo(수요일만 K5가 Breast US라 그날 Mammo는 K4).
+# 규칙: K4가 Breast US면 K5가 Mammo / K5가 Breast US(수)면 K4가 Mammo.
+K5_AM_MAMMO_DAYS = {0, 1, 3, 4}
 
 MAMMO2_PM_FIX = {
     0: ["K1", "K5", "K4"],  # 월 (K5·K4 고정)
@@ -437,6 +443,8 @@ class State:
         self.f_locali_pm = new_counter(F_STAFF)
         self.k_vab = new_counter(K_STAFF)
         self.k_stmmt = new_counter(K_STAFF)
+        self.k_am_mammo = new_counter(K_STAFF)   # K별 오전 Mammo 누적(균등 배분용)
+        self.k_am_abus = new_counter(K_STAFF)    # K별 오전 ABUS 누적(균등 배분용)
         self.r_mammo_partners = set()
         self.f_mammo2_rotation_idx = 0
 
@@ -466,41 +474,51 @@ def assign_am(d, is_first_workday):
 
     lead = BREAST_AM_LEAD_OVERRIDE.get(d, BREAST_AM_LEAD[wd])
     extra = BREAST_AM_EXTRA.get(wd)
-    if lead in avail_K:
+    # K1(갑상선)을 뺀 '유연 K' 후보 = Breast 주담당/추가고정/Mammo/ABUS 로 나뉜다.
+    flex = [k for k in avail_K if k not in used_K]
+
+    # 1) Breast US 주 담당(또는 대체). K4·K5는 다른 K 없이도 단독으로 맡을 수 있다(자격자).
+    #    단, Mammo 는 K가 반드시 있어야 하므로(F 단독 불가), 대체로 K를 끌어와 Mammo용 K가
+    #    하나도 안 남는 상황은 피한다 → 그럴 땐 대체하지 않고 Breast는 F가 커버, K는 Mammo로 아낀다.
+    if lead in flex:
         duties["breast"].append(lead)
         used_K.add(lead)
+        flex.remove(lead)
     else:
-        # 주 담당 K가 없을 때의 단독 대체 후보.
-        # K4·K5는 다른 K 없이도 오전 Breast US를 단독으로 맡을 수 있다(자격자).
-        # → 예전엔 K5를 자기 Mammo 요일(화·금)에 제외했으나, 이제 제외하지 않아
-        #   그 요일에 주 담당이 비면 K5가 혼자 Breast US를 커버할 수 있다.
-        pool = [
-            k for k in avail_K
-            if k not in used_K and k != extra and k != lead
-        ]
-        if pool:
-            sub = pool[0]
+        subs = [k for k in flex if k != extra]      # 추가고정(수 K5)은 대체 후보에서 제외
+        reserve_for_mammo = 1                        # Mammo용으로 최소 1명은 남긴다
+        if len(subs) > reserve_for_mammo:
+            sub = subs[0]
             duties["breast"].append(sub)
             used_K.add(sub)
+            flex.remove(sub)
             notes.append(f"{d.month}/{d.day} {lead} 오전 휴가 → {sub}(으)로 Breast US 대체")
-    if extra and extra in avail_K and extra not in used_K:
+
+    # 2) 추가 고정(수요일 K5) → Breast US. 단 Mammo용 K 1명은 남겨둔다.
+    if extra and extra in flex and len(flex) > 1:
         duties["breast"].append(extra)
         used_K.add(extra)
+        flex.remove(extra)
 
-    remaining_K = [k for k in avail_K if k not in used_K]
-    # 특정 날짜에만 '남는 K 중 mammo로 보낼 사람'을 지정(나머지는 abus).
-    prefer_mammo = AM_MAMMO_PREFER.get(d)
-    if prefer_mammo in remaining_K:
-        remaining_K = [prefer_mammo] + [k for k in remaining_K if k != prefer_mammo]
-    if wd in K5_AM_MAMMO_DAYS and "K5" in remaining_K:
-        duties["mammo"].append("K5")
-        for k in remaining_K:
-            if k != "K5":
-                duties["abus"].append(k)
-    elif remaining_K:
-        duties["mammo"].append(remaining_K[0])
-        for k in remaining_K[1:]:
-            duties["abus"].append(k)
+    # 3) 오전 Mammo: 근무 K 중 '누적이 적은' 사람을 골라 K2~K5가 비율상 골고루 맡게 한다.
+    #    (수동 지정일이 있으면 그 사람 우선.) Mammo 는 반드시 1명(K)이 채운다.
+    if flex:
+        prefer_mammo = AM_MAMMO_PREFER.get(d)
+        if prefer_mammo in flex:
+            mammo_pick = prefer_mammo
+        else:
+            # Mammo 누적이 가장 적은 사람, 동률이면 ABUS 누적이 많은 사람에게 Mammo를 준다.
+            mammo_pick = min(flex, key=lambda k: (STATE.k_am_mammo[k], -STATE.k_am_abus[k]))
+        duties["mammo"].append(mammo_pick)
+        used_K.add(mammo_pick)
+        flex.remove(mammo_pick)
+        STATE.k_am_mammo[mammo_pick] += 1
+
+    # 4) 그래도 남는 K → ABUS (누적 집계도 함께).
+    for k in flex:
+        duties["abus"].append(k)
+        used_K.add(k)
+        STATE.k_am_abus[k] += 1
 
     # AM 정원(최대 인원): Breast US 최대 5명, Thyroid US 최대 4명 (요일 무관)
     breast_cap = 5
@@ -771,6 +789,10 @@ def apply_manual_adjustments(day_data):
 
 
 def build_schedule(year, month):
+    # 매 생성마다 누적 카운터를 새로 시작한다(웹판에서 여러 번 생성해도 서로 영향 없게).
+    global STATE
+    STATE = State()
+
     monwed_item, tuethu_item = vab_stmmt_items(month)
     weeks = month_weeks(year, month)
     day_data = {}
