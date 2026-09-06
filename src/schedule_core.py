@@ -12,10 +12,10 @@
 
 기준 문서(SoT): docs/스케줄_배정_규정.docx  ← 규칙을 바꾸면 이 문서도 함께 갱신한다.
     (SoT 문서가 말하는 schedule_generator.py 의 배정 로직이 지금은 이 파일에 들어 있다.)
-K4·K5 고정 배정 규칙(현재):
-    - 오전 Breast US ↔ Mammo 짝: K4가 Breast US면 K5가 Mammo / K5가 Breast US(수)면 K4가 Mammo.
-      → K5 오전 Mammo: 월·화·목·금 / K5 오전 Breast US 추가고정: 수 / K4 오전 Breast US 주담당: 월·목·금
-    - 그날 Mammo 담당 K는 Breast 대체로 빼앗기지 않게 보호하고, K가 부족하면 남는 K를 Mammo에 우선 배정한다.
+K4·K5 배정 규칙(현재 — K3 휴직 동안 한시적):
+    - 오전 Breast US 주담당: 월·목=K4, 화·수=K5, 금=K4·K5 번갈아. (K3 복귀 시 화·수=K2, 금=K4로 원복)
+    - 오전 Mammo/ABUS: 요일 고정 없이, 그날 근무 K 중 누적이 적은 사람을 골라 K2~K5가 비율상 균등 배분.
+    - Mammo는 반드시 K 1명이 채운다(F 단독 불가). K가 부족하면 Breast(F가 커버 가능)보다 Mammo에 K를 우선 배정.
     - K4 오후 Mammo2 고정: 월·목·금 / K5 오후 Mammo2 고정: 월·화·목
 
 의존 패키지: openpyxl, holidays (둘 다 없으면 `pip install openpyxl holidays` 로 설치)
@@ -42,19 +42,21 @@ J_STAFF = ["J1", "J2"]
 R_NAME = "R"
 ALL_NAMES = K_STAFF + F_STAFF + J_STAFF + [R_NAME]
 
-BREAST_AM_LEAD = {0: "K4", 1: "K2", 2: "K2", 3: "K4", 4: "K4"}
+# 오전 Breast US 주 담당(요일별 1명).
+# ※ 2026년 K3 휴직 동안의 '한시적' 배치 — 월·목=K4, 화·수=K5, 금=K4·K5 번갈아(아래 assign_am).
+#   K3 복귀 시 원복: {0:"K4", 1:"K2", 2:"K2", 3:"K4", 4:"K4"} (화·수=K2, 금=K4 고정).
+BREAST_AM_LEAD = {0: "K4", 1: "K5", 2: "K5", 3: "K4", 4: "K4"}  # 금(4)은 assign_am에서 K4/K5 교대로 덮어씀
 # 특정 날짜에만 오전 Breast US 대표 K를 교체(그 날 원래 대표 K는 자동으로 mammo/abus로 밀림).
 # 2026-08-31(월): K3가 9/1부터 출장이라 이 하루만 근무 → K3를 대표로, K4는 Breast US에서 빠짐.
 BREAST_AM_LEAD_OVERRIDE = {date(2026, 8, 31): "K3"}
 # 특정 날짜에만 '남는 K 중 오전 mammo로 보낼 사람'을 지정(나머지 남는 K는 abus).
 # 2026-08-31(월): K3가 Breast 대표로 들어가며 밀려난 K4를 abus 대신 mammo로.
 AM_MAMMO_PREFER = {date(2026, 8, 31): "K4"}
-# 오전 Breast US 추가 고정 K(주 담당과 함께 들어감). 이제 수요일만 K5가 추가로 Breast US.
-# (월·목은 K4가 단독 Breast US, K5는 Mammo로 → 아래 K5_AM_MAMMO_DAYS 참조)
-BREAST_AM_EXTRA = {2: "K5"}
-# K5: 오전 Mammo 담당 요일. 월·화·목·금 = K5가 Mammo(수요일만 K5가 Breast US라 그날 Mammo는 K4).
-# 규칙: K4가 Breast US면 K5가 Mammo / K5가 Breast US(수)면 K4가 Mammo.
-K5_AM_MAMMO_DAYS = {0, 1, 3, 4}
+# 오전 Breast US 추가 고정 K(주 담당과 함께). 현재 없음(K5가 화·수 주 담당이라 추가고정 불필요).
+BREAST_AM_EXTRA = {}
+# 금요일 Breast US 주담당을 K4·K5 번갈아 맡길 후보(assign_am에서 누적 적은 쪽 선택).
+FRIDAY_BREAST_ROTATION = ["K4", "K5"]
+# (오전 Mammo/ABUS는 그날 남는 K끼리 누적 균등 배분 — K5_AM_MAMMO_DAYS 같은 요일 고정은 폐지됨)
 
 MAMMO2_PM_FIX = {
     0: ["K1", "K5", "K4"],  # 월 (K5·K4 고정)
@@ -445,6 +447,7 @@ class State:
         self.k_stmmt = new_counter(K_STAFF)
         self.k_am_mammo = new_counter(K_STAFF)   # K별 오전 Mammo 누적(균등 배분용)
         self.k_am_abus = new_counter(K_STAFF)    # K별 오전 ABUS 누적(균등 배분용)
+        self.friday_breast_lead = new_counter(["K4", "K5"])  # 금요일 Breast US 주담당 교대용
         self.r_mammo_partners = set()
         self.f_mammo2_rotation_idx = 0
 
@@ -472,7 +475,18 @@ def assign_am(d, is_first_workday):
         duties["thyroid"].append("K1")
         used_K.add("K1")
 
-    lead = BREAST_AM_LEAD_OVERRIDE.get(d, BREAST_AM_LEAD[wd])
+    lead = BREAST_AM_LEAD_OVERRIDE.get(d)
+    if lead is None:
+        if wd == 4:
+            # 금요일 Breast US 주담당: K4·K5 번갈아(그동안 적게 맡은 쪽). 한시적.
+            fri_cands = [k for k in FRIDAY_BREAST_ROTATION if k in avail_K]
+            if fri_cands:
+                lead = min(fri_cands, key=lambda k: STATE.friday_breast_lead[k])
+                STATE.friday_breast_lead[lead] += 1
+            else:
+                lead = BREAST_AM_LEAD[wd]   # 둘 다 부재 → 아래 대체 로직이 처리
+        else:
+            lead = BREAST_AM_LEAD[wd]
     extra = BREAST_AM_EXTRA.get(wd)
     # K1(갑상선)을 뺀 '유연 K' 후보 = Breast 주담당/추가고정/Mammo/ABUS 로 나뉜다.
     flex = [k for k in avail_K if k not in used_K]
