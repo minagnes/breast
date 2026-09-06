@@ -478,21 +478,21 @@ def assign_am(d, is_first_workday):
     flex = [k for k in avail_K if k not in used_K]
 
     # 1) Breast US 주 담당(또는 대체). K4·K5는 다른 K 없이도 단독으로 맡을 수 있다(자격자).
-    #    단, Mammo 는 K가 반드시 있어야 하므로(F 단독 불가), 대체로 K를 끌어와 Mammo용 K가
-    #    하나도 안 남는 상황은 피한다 → 그럴 땐 대체하지 않고 Breast는 F가 커버, K는 Mammo로 아낀다.
-    if lead in flex:
+    #    ★ Mammo 는 K가 반드시 있어야 하고(F 단독 불가) Breast 는 F로도 커버되므로,
+    #      유연 K가 1명뿐이면 그 K를 Breast(주담당/대체)에 쓰지 않고 아래 Mammo용으로 남긴다.
+    if lead in flex and len(flex) > 1:
         duties["breast"].append(lead)
         used_K.add(lead)
         flex.remove(lead)
-    else:
+    elif lead not in flex:
         subs = [k for k in flex if k != extra]      # 추가고정(수 K5)은 대체 후보에서 제외
-        reserve_for_mammo = 1                        # Mammo용으로 최소 1명은 남긴다
-        if len(subs) > reserve_for_mammo:
+        if len(subs) > 1:                            # 대체로 1명 빼도 Mammo용 K가 남을 때만 대체
             sub = subs[0]
             duties["breast"].append(sub)
             used_K.add(sub)
             flex.remove(sub)
             notes.append(f"{d.month}/{d.day} {lead} 오전 휴가 → {sub}(으)로 Breast US 대체")
+    # (주 담당이 그날 유일한 유연 K인 경우: 여기서 Breast에 넣지 않고 두어 3)에서 Mammo로 간다 → Breast는 F가 커버)
 
     # 2) 추가 고정(수요일 K5) → Breast US. 단 Mammo용 K 1명은 남겨둔다.
     if extra and extra in flex and len(flex) > 1:
